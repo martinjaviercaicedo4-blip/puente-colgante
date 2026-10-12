@@ -3,6 +3,7 @@ Puente Colgante — Calculadora web con Streamlit
 """
 
 import io
+from decimal import Decimal, ROUND_HALF_UP
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -16,12 +17,41 @@ import streamlit as st
 
 
 # ─────────────────────────────────────────
+#  Redondeo escolar (mitad hacia arriba)
+# ─────────────────────────────────────────
+
+def _decimal(v, decimales):
+    # round(v, 10) elimina el ruido binario (1.5624999999 → 1.5625) antes de redondear
+    q = Decimal(1).scaleb(-decimales)
+    return Decimal(str(round(v, 10))).quantize(q, rounding=ROUND_HALF_UP)
+
+
+def redondear(v, decimales=3):
+    """Redondeo escolar: 1.5625 → 1.563 (round() de Python daría 1.562)."""
+    return float(_decimal(v, decimales))
+
+
+def fmt(v, decimales=3):
+    """Texto con redondeo escolar y número fijo de decimales."""
+    return f"{_decimal(v, decimales):f}"
+
+
+# ─────────────────────────────────────────
 #  Cálculo central
 # ─────────────────────────────────────────
 
-def calcular(L, frac, maqueta_cm):
+COLUMNAS_TABLA = [
+    "i",
+    "x real (m)", "y real (m)", "Tensor real (m)",
+    "Dist. desde torre izquierda (m)", "Dist. desde torre derecha (m)",
+    "x maqueta (cm)", "y maqueta (cm)", "Tensor maqueta (cm)",
+    "Dist. desde torre izquierda (cm)", "Dist. desde torre derecha (cm)",
+]
+
+
+def calcular(L, frac, maqueta_cm, h0_cm):
     factor = maqueta_cm / (L * 100)
-    denom = round(1 / factor)
+    denom = int(_decimal(1 / factor, 0))
     escala_str = f"1 : {denom}"
     f  = frac * L
     p  = L / 2
@@ -31,23 +61,43 @@ def calcular(L, frac, maqueta_cm):
     def a_maqueta(metros):
         return metros * 100 * factor
 
+    # La holgura se da en cm de maqueta; en el puente real equivale a h0_cm / (100·k) m
+    h0 = h0_cm / (100 * factor)
+
     tabla = []
     for i in range(17):
         xi = -p + i * d
         yi = a * xi ** 2
-        di = L - i * d
+        ti = yi + h0
+        izq = xi + p
+        der = L - i * d
         tabla.append((
             i,
-            round(xi, 3), round(yi, 3),
-            round(a_maqueta(xi), 3), round(a_maqueta(yi), 3),
-            round(di, 3), round(a_maqueta(di), 3),
+            redondear(xi), redondear(yi), redondear(ti),
+            redondear(izq), redondear(der),
+            redondear(a_maqueta(xi)), redondear(a_maqueta(yi)), redondear(a_maqueta(ti)),
+            redondear(a_maqueta(izq)), redondear(a_maqueta(der)),
         ))
+
+    # Suma de los 17 tensores (las torres en i = 0 e i = 16 incluidas),
+    # sumando los valores redondeados de la tabla para que coincida al verificar a mano
+    suma_tensores    = float(sum(Decimal(str(row[3])) for row in tabla))
+    suma_tensores_cm = float(sum(Decimal(str(row[8])) for row in tabla))
+
+    # Longitud aproximada del cable parabólico: L·(1 + 8/3·(f/L)²)
+    long_cable = L * (1 + 8 / 3 * (f / L) ** 2)
 
     return {
         'L': L, 'f': f, 'p': p, 'd': d, 'a': a,
-        'factor': factor, 'escala_str': escala_str,
+        'a_cm': a / (100 * factor),
+        'h0': h0, 'h0_cm': h0_cm,
+        'torre': f + h0,
+        'factor': factor, 'denom': denom, 'escala_str': escala_str,
         'maqueta_cm': maqueta_cm,
         'tabla': tabla,
+        'suma_tensores': suma_tensores,
+        'suma_tensores_cm': suma_tensores_cm,
+        'long_cable': long_cable,
         'a_maqueta': a_maqueta,
     }
 
@@ -58,16 +108,17 @@ def calcular(L, frac, maqueta_cm):
 
 def graficar_2d(r, nombre_prop):
     L, f, p, d, a = r['L'], r['f'], r['p'], r['d'], r['a']
+    h0   = r['h0']
     am   = r['a_maqueta']
     tabla = r['tabla']
 
     xs_r = np.linspace(-p, p, 400)
-    ys_r = a * xs_r ** 2
+    ys_r = a * xs_r ** 2 + h0
     xs_m = [am(x) for x in xs_r]
     ys_m = [am(y) for y in ys_r]
 
-    titulo_base = (f"Puente colgante  |  f(x) = {a:.4f}·x²  "
-                   f"|  L = {L:.2f} m  |  f = {f:.3f} m")
+    titulo_base = (f"Puente colgante  |  y = {fmt(a, 4)}·x²  |  tensor = y + h₀  "
+                   f"|  L = {fmt(L, 2)} m  |  f = {fmt(f)} m  |  h₀ = {fmt(h0)} m")
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 7))
     fig.suptitle(titulo_base, fontsize=12, fontweight='bold')
@@ -78,27 +129,28 @@ def graficar_2d(r, nombre_prop):
             'titulo': f"Escala real — {r['escala_str']}",
             'xs_curva': xs_r, 'ys_curva': ys_r,
             'pts_x': [row[1] for row in tabla],
-            'pts_y': [row[2] for row in tabla],
-            'p_val': p, 'f_val': f,
-            'xlabel': 'x (m)', 'ylabel': 'y (m)',
-            'info_d': f"d = L/16 = {d:.3f} m",
+            'pts_y': [row[3] for row in tabla],
+            'p_val': p, 't_val': f + h0, 'h0_val': h0,
+            'xlabel': 'x (m)', 'ylabel': 'altura sobre el tablero (m)',
+            'info_d': f"d = L/16 = {fmt(d)} m",
         },
         {
             'ax': axes[1],
             'titulo': f"Escala maqueta — {r['maqueta_cm']:.1f} cm",
             'xs_curva': xs_m, 'ys_curva': ys_m,
-            'pts_x': [row[3] for row in tabla],
-            'pts_y': [row[4] for row in tabla],
-            'p_val': am(p), 'f_val': am(f),
-            'xlabel': 'x (cm)', 'ylabel': 'y (cm)',
-            'info_d': f"d = L/16 = {am(d):.3f} cm",
+            'pts_x': [row[6] for row in tabla],
+            'pts_y': [row[8] for row in tabla],
+            'p_val': am(p), 't_val': am(f + h0), 'h0_val': am(h0),
+            'xlabel': 'x (cm)', 'ylabel': 'altura sobre el tablero (cm)',
+            'info_d': f"d = L/16 = {fmt(am(d))} cm",
         },
     ]
 
     for pan in paneles:
         ax  = pan['ax']
         pv  = pan['p_val']
-        fv  = pan['f_val']
+        fv  = pan['t_val']
+        hv  = pan['h0_val']
 
         ax.plot(pan['xs_curva'], pan['ys_curva'],
                 color='steelblue', linewidth=2.2, label='Cable (parábola)', zorder=3)
@@ -119,15 +171,15 @@ def graficar_2d(r, nombre_prop):
             ax.plot([tx, tx], [0, ty], color='darkorange', linewidth=3.5,
                     linestyle='-', zorder=4,
                     label='Torre' if signo == -1 else '_nolegend_')
-            ax.annotate(f"Torre ({tx:.2f}, {ty:.2f})",
+            ax.annotate(f"Torre ({fmt(tx, 2)}, {fmt(ty, 2)})",
                         xy=(tx, ty),
                         xytext=(tx + pv * 0.04, ty + fv * 0.04),
                         fontsize=8, color='darkorange',
                         arrowprops=dict(arrowstyle='->', color='darkorange', lw=0.8))
 
-        ax.scatter([0], [0], color='red', s=90, zorder=6)
-        ax.annotate("V(0, 0)  tensor=0", xy=(0, 0),
-                    xytext=(pv * 0.05, fv * 0.12),
+        ax.scatter([0], [hv], color='red', s=90, zorder=6)
+        ax.annotate(f"V(0, {fmt(hv)})  tensor = h₀", xy=(0, hv),
+                    xytext=(pv * 0.05, hv + fv * 0.12),
                     fontsize=9, color='red',
                     arrowprops=dict(arrowstyle='->', color='red', lw=1))
 
@@ -141,7 +193,7 @@ def graficar_2d(r, nombre_prop):
         ax.set_title(pan['titulo'])
         ax.set_aspect('equal')
         ax.grid(True, linestyle=':', alpha=0.6)
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=8, loc='upper center')
 
     plt.tight_layout()
     return fig
@@ -153,6 +205,8 @@ def graficar_2d(r, nombre_prop):
 
 def graficar_3d(r):
     L, f, p, d, a = r['L'], r['f'], r['p'], r['d'], r['a']
+    h0 = r['h0']
+    ht = f + h0   # altura de la torre sobre el tablero
 
     # Ancho del tablero ~ L/10, con mínimo razonable
     bw = max(L / 10, 1.5)
@@ -161,7 +215,7 @@ def graficar_3d(r):
     ax  = fig.add_subplot(111, projection='3d')
 
     xs = np.linspace(-p, p, 300)
-    zs = a * xs ** 2
+    zs = a * xs ** 2 + h0
 
     # ── Cables principales (uno a cada lado) ──
     for ys, lbl in [(-bw/2, 'Cable principal'), (bw/2, '_')]:
@@ -183,16 +237,16 @@ def graficar_3d(r):
     # ── Torres en x = ±p ──
     for tx in [-p, p]:
         for ty in [-bw/2, bw/2]:
-            ax.plot([tx, tx], [ty, ty], [0, f],
+            ax.plot([tx, tx], [ty, ty], [0, ht],
                     color='darkorange', linewidth=3.5,
                     label='Torre' if (tx == -p and ty == -bw/2) else '_')
-        ax.plot([tx, tx], [-bw/2, bw/2], [f,      f     ], color='darkorange', linewidth=2.5)
-        ax.plot([tx, tx], [-bw/2, bw/2], [f*0.55, f*0.55], color='darkorange', linewidth=1.8)
+        ax.plot([tx, tx], [-bw/2, bw/2], [ht,      ht     ], color='darkorange', linewidth=2.5)
+        ax.plot([tx, tx], [-bw/2, bw/2], [ht*0.55, ht*0.55], color='darkorange', linewidth=1.8)
 
     # ── Tensores cada d metros ──
     for i in range(17):
         xi = -p + i * d
-        zi = a * xi ** 2
+        zi = a * xi ** 2 + h0
         for ys in [-bw/2, bw/2]:
             ax.plot([xi, xi], [ys, ys], [0, zi],
                     color='lightsteelblue', linewidth=0.7,
@@ -217,14 +271,14 @@ def graficar_3d(r):
             color='#8B0000', linewidth=0.8, linestyle=':')
     ax.text(px + bw*0.13, py, ph/2, '1.80 m',
             fontsize=7, color='#8B0000', fontweight='bold')
-    ax.text(p, bw/2 + bw*0.15, f*1.04,
-            f'Torre {f:.2f} m', fontsize=7, color='darkorange', fontweight='bold')
+    ax.text(p, bw/2 + bw*0.15, ht*1.04,
+            f'Torre {fmt(ht, 2)} m', fontsize=7, color='darkorange', fontweight='bold')
 
     ax.set_xlabel('Longitud (m)', labelpad=8)
     ax.set_ylabel('Ancho (m)',    labelpad=8)
     ax.set_zlabel('Altura (m)',   labelpad=8)
     ax.set_title(
-        f'Vista 3D a escala real  —  L = {L:.2f} m  |  f = {f:.3f} m  |  {r["escala_str"]}',
+        f'Vista 3D a escala real  —  L = {fmt(L, 2)} m  |  f = {fmt(f)} m  |  h₀ = {fmt(h0)} m  |  {r["escala_str"]}',
         fontsize=10, fontweight='bold', pad=12
     )
 
@@ -233,7 +287,7 @@ def graficar_3d(r):
     # Límites de cada eje en metros reales
     x_lo, x_hi = -p,       p + bw*0.55
     y_lo, y_hi = -bw*1.1,  bw*1.1
-    z_lo, z_hi =  0,        f * 1.35
+    z_lo, z_hi =  0,        ht * 1.35
     ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(y_lo, y_hi)
     ax.set_zlim(z_lo, z_hi)
@@ -276,9 +330,12 @@ def exportar_excel_bytes(r, nombre_prop):
         return c
 
     L, f, p, d, a = r['L'], r['f'], r['p'], r['d'], r['a']
+    h0 = r['h0']
     am = r['a_maqueta']
+    fmt6 = '0.000000'
+    n_cols = len(COLUMNAS_TABLA)
 
-    ws.merge_cells('A1:G1')
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
     c = ws['A1']
     c.value = "PUENTE COLGANTE — Calculadora de cable parabólico"
     c.font = Font(name='Calibri', bold=True, size=14, color="FFFFFF")
@@ -291,17 +348,17 @@ def exportar_excel_bytes(r, nombre_prop):
     celda(ws, fila, 2, "VALOR",     bold=True, fill=azul_medio)
     celda(ws, fila, 3, "UNIDAD",    bold=True, fill=azul_medio)
     fila += 1
-    for nombre, valor, unidad in [
-        ("Escala",            r['escala_str'],        ""),
-        ("Proporción flecha", nombre_prop,             ""),
-        ("Constante  a",      a,                      "m⁻¹"),
-        ("Función",           f"f(x) = {a:.6f}·x²",  ""),
+    for nombre, valor, unidad, formato in [
+        ("Factor de escala  k",  redondear(r['factor'], 6), "",     fmt6),
+        ("Escala  1:E",          r['escala_str'],           "",     None),
+        ("Proporción flecha",    nombre_prop,               "",     None),
+        ("Coeficiente  a",       redondear(a, 6),           "m⁻¹",  fmt6),
+        ("Coeficiente  a",       redondear(r['a_cm'], 6),   "cm⁻¹", fmt6),
+        ("Ecuación del cable",   f"y = {fmt(a, 6)}·x²",     "m",    None),
+        ("Tensor",               "Tᵢ = yᵢ + h₀",            "",     None),
     ]:
         celda(ws, fila, 1, nombre, align='left')
-        if isinstance(valor, float):
-            celda(ws, fila, 2, valor, fmt=fmt3)
-        else:
-            celda(ws, fila, 2, valor)
+        celda(ws, fila, 2, valor, fmt=formato)
         celda(ws, fila, 3, unidad)
         fila += 1
 
@@ -311,24 +368,23 @@ def exportar_excel_bytes(r, nombre_prop):
     celda(ws, fila, 3, "MAQUETA (cm)", bold=True, fill=azul_medio)
     fila += 1
     for nombre_m, real, maq in [
-        ("Luz  L",        L,   am(L)),
-        ("Semiluz  p",    p,   am(p)),
-        ("Flecha  f",     f,   am(f)),
-        ("Distancia  d",  d,   am(d)),
-        ("Tensor mínimo", 0.0, 0.0),
-        ("Tensor máximo", f,   am(f)),
+        ("Luz  L",                     L,                     am(L)),
+        ("Semiluz  p",                 p,                     am(p)),
+        ("Flecha  f",                  f,                     am(f)),
+        ("Holgura central  h₀",        h0,                    r['h0_cm']),
+        ("Altura torre  f + h₀",       r['torre'],            am(r['torre'])),
+        ("Distancia  d",               d,                     am(d)),
+        ("Tensor mínimo (h₀)",         h0,                    r['h0_cm']),
+        ("Suma de los 17 tensores",    r['suma_tensores'],    r['suma_tensores_cm']),
+        ("Longitud aprox. del cable",  r['long_cable'],       am(r['long_cable'])),
     ]:
         celda(ws, fila, 1, nombre_m, align='left')
-        celda(ws, fila, 2, real, fmt=fmt3)
-        celda(ws, fila, 3, maq,  fmt=fmt3)
+        celda(ws, fila, 2, redondear(real), fmt=fmt3)
+        celda(ws, fila, 3, redondear(maq),  fmt=fmt3)
         fila += 1
 
     fila += 1
-    for col, h in enumerate([
-        "i", "x real (m)", "y real (m)",
-        "x maqueta (cm)", "y maqueta (cm)",
-        "Dist. Tensores (m)", "Dist. Tensores (cm)",
-    ], 1):
+    for col, h in enumerate(COLUMNAS_TABLA, 1):
         celda(ws, fila, col, h, bold=True, fill=azul_oscuro)
     fila += 1
 
@@ -339,8 +395,9 @@ def exportar_excel_bytes(r, nombre_prop):
             celda(ws, fila, col, val, fill=fill_row, fmt=fmt3 if col > 1 else None)
         fila += 1
 
-    for i, ancho in enumerate([6, 14, 14, 18, 18, 18, 22], 1):
-        ws.column_dimensions[get_column_letter(i)].width = ancho
+    ws.column_dimensions['A'].width = 26
+    for i in range(2, n_cols + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 20
 
     ws2 = wb.create_sheet("Info técnica")
     ws2['A1'] = "Relación f/L"
@@ -422,6 +479,16 @@ with st.sidebar:
         value=50.0, step=1.0, format="%.1f"
     )
 
+    h0_cm = st.number_input(
+        "Holgura central h₀ (cm de maqueta)",
+        min_value=0.0, max_value=1000.0,
+        value=1.0, step=0.1, format="%.2f",
+        help="Altura del cable sobre el tablero en el centro del puente. "
+             "El tensor central no puede medir 0 cm, porque el cable necesita amarre.",
+    )
+    if h0_cm == 0:
+        st.warning("Con h₀ = 0 el tensor central mide 0 cm y no se puede construir.")
+
     calcular_btn = st.button("Calcular", type="primary", use_container_width=True)
 
 # ── Al presionar Calcular: generar todo y guardarlo en session_state ──
@@ -430,7 +497,7 @@ if calcular_btn:
         st.error("Corrija la proporción de flecha antes de calcular.")
     else:
         with st.spinner("Calculando..."):
-            r = calcular(L, frac, maqueta_cm)
+            r = calcular(L, frac, maqueta_cm, h0_cm)
 
             fig2d = graficar_2d(r, nombre_prop)
             buf2d = io.BytesIO()
@@ -463,10 +530,22 @@ if st.session_state.resultado is not None:
     # ── Métricas principales ──
     st.subheader("Parámetros del puente")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Escala",       r['escala_str'])
-    c2.metric("Proporción",   nombre_prop_s)
-    c3.metric("Flecha  f",    f"{f_val:.3f} m")
-    c4.metric("Constante  a", f"{r['a']:.6f}")
+    c1.metric("Escala  1:E",         r['escala_str'])
+    c2.metric("Factor  k",           fmt(r['factor'], 6))
+    c3.metric("Proporción",          nombre_prop_s)
+    c4.metric("Flecha  f",           f"{fmt(f_val)} m")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Coeficiente  a (m)",  f"{fmt(r['a'], 6)} m⁻¹")
+    c6.metric("Coeficiente  a (cm)", f"{fmt(r['a_cm'], 6)} cm⁻¹")
+    c7.metric("Holgura  h₀",         f"{fmt(r['h0_cm'], 2)} cm")
+    c8.metric("Altura torre  f + h₀ (maqueta)", f"{fmt(am(r['torre']))} cm")
+
+    st.markdown(
+        f"**Ecuación del cable:** $y = {fmt(r['a'], 6)}\\,x^2$ (x, y en m) "
+        f"— en la maqueta: $y = {fmt(r['a_cm'], 6)}\\,x^2$ (x, y en cm)  \n"
+        f"**Tensor:** $T_i = y_i + h_0$, con $h_0 = {fmt(r['h0'])}$ m reales "
+        f"$= {fmt(r['h0_cm'], 2)}$ cm de maqueta"
+    )
 
     # ── Aviso técnico con información expandible ──
     if 1/12 <= fL <= 1/8:
@@ -546,24 +625,35 @@ Para una luz de **{L_val:.2f} m**, la flecha óptima estaría entre:
     # ── Resumen de medidas ──
     st.subheader("Resumen de medidas")
     df_resumen = pd.DataFrame([
-        ["Luz  L",        f"{L_val:.3f}",      f"{am(L_val):.3f}"],
-        ["Semiluz  p",    f"{r['p']:.3f}",      f"{am(r['p']):.3f}"],
-        ["Flecha  f",     f"{f_val:.3f}",        f"{am(f_val):.3f}"],
-        ["Distancia  d",  f"{r['d']:.3f}",       f"{am(r['d']):.3f}"],
-        ["Tensor mínimo", "0.000",                "0.000"],
-        ["Tensor máximo", f"{f_val:.3f}",         f"{am(f_val):.3f}"],
+        ["Luz  L",                    fmt(L_val),                fmt(am(L_val))],
+        ["Semiluz  p",                fmt(r['p']),               fmt(am(r['p']))],
+        ["Flecha  f",                 fmt(f_val),                fmt(am(f_val))],
+        ["Holgura central  h₀",       fmt(r['h0']),              fmt(r['h0_cm'])],
+        ["Altura torre  f + h₀",      fmt(r['torre']),           fmt(am(r['torre']))],
+        ["Distancia  d",              fmt(r['d']),               fmt(am(r['d']))],
+        ["Tensor mínimo (h₀)",        fmt(r['h0']),              fmt(r['h0_cm'])],
+        ["Suma de los 17 tensores",   fmt(r['suma_tensores']),   fmt(r['suma_tensores_cm'])],
+        ["Longitud aprox. del cable", fmt(r['long_cable']),      fmt(am(r['long_cable']))],
     ], columns=["Medida", "Real (m)", "Maqueta (cm)"])
     st.dataframe(df_resumen, hide_index=True, use_container_width=False)
+    st.caption(
+        "La suma incluye los 17 tensores: las dos torres (i = 0 e i = 16, altura f + h₀) "
+        "y los 15 intermedios. La longitud del cable usa la aproximación "
+        "L·(1 + 8/3·(f/L)²); h₀ no la cambia porque solo sube el cable."
+    )
 
     # ── Tabla de 17 puntos ──
     st.subheader("Tabla de 17 puntos")
-    df_tabla = pd.DataFrame(r['tabla'], columns=[
-        "i",
-        "x real (m)", "y real (m)",
-        "x maqueta (cm)", "y maqueta (cm)",
-        "Dist. Tensores (m)", "Dist. Tensores (cm)",
-    ])
-    st.dataframe(df_tabla, hide_index=True, use_container_width=True)
+    df_tabla = pd.DataFrame(r['tabla'], columns=COLUMNAS_TABLA)
+    st.dataframe(
+        df_tabla, hide_index=True, use_container_width=True,
+        column_config={c: st.column_config.NumberColumn(format="%.3f")
+                       for c in COLUMNAS_TABLA[1:]},
+    )
+    st.caption(
+        "Tensor = yᵢ + h₀: medida lista para cortar. Para marcar los tensores sobre el tablero "
+        "de izquierda a derecha, use «Dist. desde torre izquierda» (xᵢ + p)."
+    )
 
     # ── Gráficas en pestañas ──
     st.subheader("Gráficas")
@@ -577,7 +667,7 @@ Para una luz de **{L_val:.2f} m**, la flecha óptima estaría entre:
         st.caption(
             f"La figura muestra el puente a escala real. "
             f"La persona de 1.80 m junto a la torre permite comparar proporciones. "
-            f"Altura de torre: {f_val:.2f} m."
+            f"Altura de torre sobre el tablero (f + h₀): {fmt(r['torre'], 2)} m."
         )
 
     # ── Descargas (usan session_state → no recalculan nada) ──
