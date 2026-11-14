@@ -11,6 +11,7 @@ Opcionales:
 """
 import hashlib
 import hmac
+import io
 import os
 from collections import defaultdict, deque
 
@@ -18,7 +19,9 @@ import anthropic
 import requests
 from flask import Flask, abort, request
 
-from calculo import calcular, fmt
+from calculo import calcular, exportar_excel_bytes, fmt, graficar_2d, graficar_3d
+
+import matplotlib.pyplot as plt
 
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 GRAPH_URL = "https://graph.facebook.com/v21.0/{phone_id}/messages"
@@ -46,19 +49,35 @@ TOOLS = [{
             "flecha": {"type": "number", "description": "Proporción de flecha f/L, p. ej. 0.125 para L/8, 0.1667 para L/6, 0.2 para L/5"},
             "maqueta_cm": {"type": "number", "description": "Longitud de la maqueta en cm"},
             "h0_cm": {"type": "number", "description": "Holgura central h0 en cm de maqueta (mayor que 0)"},
+            "enviar_archivos": {"type": "boolean", "description": "true para enviar por WhatsApp las gráficas 2D y 3D y el Excel con la tabla completa. Úsalo si el usuario los pide; si no, ofrécelos al final."},
         },
         "required": ["L", "flecha", "maqueta_cm", "h0_cm"],
     },
 }]
 
 
-def run_bridge_tool(args: dict) -> str:
+def make_files(r, nombre) -> list:
+    files = []
+    for fname, fn in (('grafica_2d.png', graficar_2d), ('grafica_3d.png', None)):
+        fig = fn(r, nombre) if fn else graficar_3d(r)
+        buf = io.BytesIO()
+        fig.savefig(buf, dpi=150, bbox_inches='tight', format='png')
+        plt.close(fig)
+        files.append((fname, buf.getvalue(), 'image/png'))
+    files.append(('puente_colgante.xlsx', exportar_excel_bytes(r, nombre),
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))
+    return files
+
+
+def run_bridge_tool(args: dict, outbox: list) -> str:
     try:
         L, frac = float(args["L"]), float(args["flecha"])
         maq, h0 = float(args["maqueta_cm"]), float(args["h0_cm"])
         if not (0.1 <= L <= 5000 and frac > 0 and maq > 0 and h0 >= 0):
             return "Error: valores fuera de rango."
         r = calcular(L, frac, maq, h0)
+        if args.get("enviar_archivos"):
+            outbox.extend(make_files(r, f"L×{frac:.5g}"))
     except (KeyError, ValueError, TypeError) as e:
         return f"Error en los datos: {e}"
     lines = [
@@ -69,6 +88,8 @@ def run_bridge_tool(args: dict) -> str:
     ]
     for t in r["tabla"]:
         lines.append(f"{t[0]} | {fmt(t[1])} | {fmt(t[2])} | {fmt(t[3])} | {fmt(t[4])} | {fmt(t[5])} | {fmt(t[8])} | {fmt(t[9])}")
+    if outbox:
+        lines.append("Las gráficas 2D/3D y el Excel se enviarán al usuario automáticamente.")
     return "\n".join(lines)
 
 app = Flask(__name__)
@@ -86,7 +107,27 @@ def send(to: str, text: str) -> None:
     ).raise_for_status()
 
 
-def ask_claude(user: str, text: str) -> str:
+def send_file(to: str, name: str, data: bytes, mime: str) -> None:
+    """Sube el archivo a WhatsApp y lo envía como imagen o documento."""
+    h = {"Authorization": f"Bearer {os.environ['WHATSAPP_TOKEN']}"}
+    base = GRAPH_URL.format(phone_id=os.environ["WHATSAPP_PHONE_ID"])
+    up = requests.post(
+        base.replace("/messages", "/media"), headers=h,
+        data={"messaging_product": "whatsapp", "type": mime},
+        files={"file": (name, data, mime)}, timeout=60,
+    )
+    up.raise_for_status()
+    kind = "image" if mime.startswith("image/") else "document"
+    media = {"id": up.json()["id"]}
+    if kind == "document":
+        media["filename"] = name
+    requests.post(
+        base, headers=h, timeout=15,
+        json={"messaging_product": "whatsapp", "to": to, "type": kind, kind: media},
+    ).raise_for_status()
+
+
+def ask_claude(user: str, text: str, outbox: list) -> str:
     history[user].append({"role": "user", "content": text})
     msgs = list(history[user])
     while msgs and msgs[0]["role"] != "user":
@@ -101,7 +142,7 @@ def ask_claude(user: str, text: str) -> str:
             break
         msgs.append({"role": "assistant", "content": resp.content})
         msgs.append({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": b.id, "content": run_bridge_tool(b.input)}
+            {"type": "tool_result", "tool_use_id": b.id, "content": run_bridge_tool(b.input, outbox)}
             for b in resp.content if b.type == "tool_use"
         ]})
     history[user].append({"role": "assistant", "content": answer or "(sin respuesta)"})
@@ -142,7 +183,10 @@ def incoming():
                     send(m["from"], "Por ahora solo entiendo mensajes de texto.")
                     continue
                 try:
-                    send(m["from"], ask_claude(m["from"], m["text"]["body"]))
+                    outbox = []
+                    send(m["from"], ask_claude(m["from"], m["text"]["body"], outbox))
+                    for name, data, mime in outbox:
+                        send_file(m["from"], name, data, mime)
                 except Exception:
                     app.logger.exception("Error procesando mensaje")
                     send(m["from"], "Hubo un error, intenta de nuevo en un momento.")

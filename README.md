@@ -2,7 +2,7 @@
 
 ## Bot de WhatsApp con Claude
 
-Código en `whatsapp_bot/`. Webhook Flask que recibe mensajes de la WhatsApp Cloud API (Meta) y responde con Claude. Claude usa la herramienta `calcular_puente`, que ejecuta `calcular()` de `calculo.py` (el mismo cálculo de la app Streamlit), así que no hace aritmética por su cuenta. Ejecútalo desde la raíz del repo.
+Código en `whatsapp_bot/`. Webhook Flask que recibe mensajes de la WhatsApp Cloud API (Meta) y responde con Claude. Claude usa la herramienta `calcular_puente`, que ejecuta `calcular()` de `calculo.py` (el mismo cálculo de la app Streamlit), así que no hace aritmética por su cuenta. Si el usuario lo pide, también envía por WhatsApp las gráficas 2D y 3D (PNG) y el Excel con la tabla completa. Ejecútalo desde la raíz del repo.
 
 1. En [developers.facebook.com](https://developers.facebook.com) crea una app con el producto WhatsApp y anota el token, el *Phone number ID* y el *App secret*.
 2. Instala y configura:
