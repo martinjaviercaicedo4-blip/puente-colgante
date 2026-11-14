@@ -1,0 +1,8 @@
+anthropic
+flask
+requests
+gunicorn
+matplotlib
+numpy
+pandas
+openpyxl
