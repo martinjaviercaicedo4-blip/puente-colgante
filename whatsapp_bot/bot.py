@@ -56,6 +56,14 @@ TOOLS = [{
 }]
 
 
+def nombre_prop(frac: float) -> str:
+    """0.125 -> 'L/8'; si no es 1/n entero, 'L×0.3'."""
+    n = round(1 / frac)
+    if n >= 1 and abs(1 / frac - n) < 1e-3:
+        return f"L/{n}"
+    return f"L×{frac:.5g}"
+
+
 def make_files(r, nombre) -> list:
     files = []
     for fname, fn in (('grafica_2d.png', graficar_2d), ('grafica_3d.png', None)):
@@ -77,7 +85,7 @@ def run_bridge_tool(args: dict, outbox: list) -> str:
             return "Error: valores fuera de rango."
         r = calcular(L, frac, maq, h0)
         if args.get("enviar_archivos"):
-            outbox.extend(make_files(r, f"L×{frac:.5g}"))
+            outbox.extend(make_files(r, nombre_prop(frac)))
     except (KeyError, ValueError, TypeError) as e:
         return f"Error en los datos: {e}"
     lines = [
