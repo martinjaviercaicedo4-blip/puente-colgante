@@ -18,13 +18,58 @@ import anthropic
 import requests
 from flask import Flask, abort, request
 
+from calculo import calcular, fmt
+
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 GRAPH_URL = "https://graph.facebook.com/v21.0/{phone_id}/messages"
 SYSTEM = (
     "Eres un asistente por WhatsApp para ingeniería de puentes colgantes "
     "(catenaria, parábola, flecha, tensiones, holgura). Responde en español, "
-    "breve y claro, sin formato markdown complejo."
+    "breve y claro, sin formato markdown complejo. Para cualquier cálculo del "
+    "puente usa SIEMPRE la herramienta calcular_puente; nunca calcules a mano. "
+    "Si falta un dato (luz L, proporción de flecha, longitud de la maqueta, "
+    "holgura h0), pídelo antes de calcular."
 )
+
+TOOLS = [{
+    "name": "calcular_puente",
+    "description": (
+        "Calcula un puente colgante de cable parabólico con 17 tensores y su escala "
+        "de maqueta: flecha, escala, longitud del cable, altura de torre y, para "
+        "cada tensor, posición x, altura y, longitud del tensor y distancias desde "
+        "ambas torres (real en m y maqueta en cm)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "L": {"type": "number", "description": "Luz del puente en metros (0.1 a 5000)"},
+            "flecha": {"type": "number", "description": "Proporción de flecha f/L, p. ej. 0.125 para L/8, 0.1667 para L/6, 0.2 para L/5"},
+            "maqueta_cm": {"type": "number", "description": "Longitud de la maqueta en cm"},
+            "h0_cm": {"type": "number", "description": "Holgura central h0 en cm de maqueta (mayor que 0)"},
+        },
+        "required": ["L", "flecha", "maqueta_cm", "h0_cm"],
+    },
+}]
+
+
+def run_bridge_tool(args: dict) -> str:
+    try:
+        L, frac = float(args["L"]), float(args["flecha"])
+        maq, h0 = float(args["maqueta_cm"]), float(args["h0_cm"])
+        if not (0.1 <= L <= 5000 and frac > 0 and maq > 0 and h0 >= 0):
+            return "Error: valores fuera de rango."
+        r = calcular(L, frac, maq, h0)
+    except (KeyError, ValueError, TypeError) as e:
+        return f"Error en los datos: {e}"
+    lines = [
+        f"Escala {r['escala_str']}; flecha f={fmt(r['f'])} m; torre={fmt(r['torre'])} m; "
+        f"h0 real={fmt(r['h0'])} m; cable aprox={fmt(r['long_cable'])} m; "
+        f"suma tensores={fmt(r['suma_tensores'])} m ({fmt(r['suma_tensores_cm'])} cm maqueta).",
+        "i | x(m) | y(m) | tensor(m) | desde torre izq(m) | desde torre der(m) | tensor maqueta(cm) | izq maqueta(cm)",
+    ]
+    for t in r["tabla"]:
+        lines.append(f"{t[0]} | {fmt(t[1])} | {fmt(t[2])} | {fmt(t[3])} | {fmt(t[4])} | {fmt(t[5])} | {fmt(t[8])} | {fmt(t[9])}")
+    return "\n".join(lines)
 
 app = Flask(__name__)
 client = anthropic.Anthropic()
@@ -46,12 +91,21 @@ def ask_claude(user: str, text: str) -> str:
     msgs = list(history[user])
     while msgs and msgs[0]["role"] != "user":
         msgs.pop(0)
-    resp = client.messages.create(
-        model=MODEL, max_tokens=1024, system=SYSTEM, messages=msgs
-    )
-    answer = "".join(b.text for b in resp.content if b.type == "text")
-    history[user].append({"role": "assistant", "content": answer})
-    return answer
+    answer = ""
+    for _ in range(5):  # bucle de herramientas
+        resp = client.messages.create(
+            model=MODEL, max_tokens=2048, system=SYSTEM, tools=TOOLS, messages=msgs
+        )
+        answer = "".join(b.text for b in resp.content if b.type == "text")
+        if resp.stop_reason != "tool_use":
+            break
+        msgs.append({"role": "assistant", "content": resp.content})
+        msgs.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": b.id, "content": run_bridge_tool(b.input)}
+            for b in resp.content if b.type == "tool_use"
+        ]})
+    history[user].append({"role": "assistant", "content": answer or "(sin respuesta)"})
+    return answer or "No pude completar el cálculo, intenta de nuevo."
 
 
 def valid_signature() -> bool:
